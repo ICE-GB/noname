@@ -58,12 +58,7 @@ self.db = {
 			caches
 				.open(self.CACHE_DB_NAME)
 				.then(function (cache) {
-					cache
-						.put(
-							new Request(`https://LOCALCACHE/${encodeURIComponent(key)}`),
-							new Response(value)
-						)
-						.then((r) => resolve());
+					cache.put(new Request(`https://LOCALCACHE/${encodeURIComponent(key)}`), new Response(value)).then((r) => resolve());
 				})
 				.catch(() => {
 					reject();
@@ -91,11 +86,7 @@ const getVersion = async () => {
 			if (version !== self.version) {
 				console.log("版本升级 " + version + " => " + self.version + " ");
 				// 定义一个允许保留的白名单
-				const cacheWhitelist = [
-					self.CACHE_DB_NAME,
-					self.CACHE_STATIC_NAME,
-					self.CACHE_NAME + self.version,
-				];
+				const cacheWhitelist = [self.CACHE_DB_NAME, self.CACHE_STATIC_NAME, self.CACHE_NAME + self.version];
 				caches.keys().then((cacheNames) => {
 					return Promise.all(
 						cacheNames.map((cacheName) => {
@@ -128,12 +119,10 @@ const fetchAndCache = (event, request, version) => {
 				// 只缓存状态为 200 的响应
 				if (networkResponse.status === 200) {
 					// 根据参数version判断是放入静态文件缓存还是版本缓存
-					return caches
-						.open(version ? self.CACHE_NAME + version : self.CACHE_STATIC_NAME)
-						.then((cache) => {
-							cache.put(request, networkResponse.clone()).then();
-							return networkResponse;
-						});
+					return caches.open(version ? self.CACHE_NAME + version : self.CACHE_STATIC_NAME).then((cache) => {
+						cache.put(request, networkResponse.clone()).then();
+						return networkResponse;
+					});
 				}
 				return networkResponse;
 			});
@@ -195,12 +184,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
 	event.waitUntil(getVersion());
 	// 定义一个允许保留的白名单
-	const cacheWhitelist = [
-		self.CACHE_DB_NAME,
-		self.CACHE_STATIC_NAME,
-		self.CACHE_NAME + self.version,
-		self.CACHE_OFFLINE_NAME,
-	];
+	const cacheWhitelist = [self.CACHE_DB_NAME, self.CACHE_STATIC_NAME, self.CACHE_NAME + self.version, self.CACHE_OFFLINE_NAME];
 	console.log("清理旧缓存，白名单为: " + cacheWhitelist);
 	caches.keys().then((cacheNames) => {
 		return Promise.all(
@@ -289,10 +273,7 @@ self.addEventListener("fetch", (event) => {
 	}
 
 	// 不是这几个后缀的，也不是内置的模块的指定版本然后返回
-	if (
-		![".ts", ".json", ".vue", "css"].some((ext) => url.pathname.endsWith(ext)) &&
-		!request.url.replace(location.origin, "").startsWith("/noname-builtinModules/")
-	) {
+	if (![".ts", ".json", ".vue", "css"].some((ext) => url.pathname.endsWith(ext)) && !request.url.replace(location.origin, "").startsWith("/noname-builtinModules/")) {
 		return fetchAndCache(event, request, self.version);
 	}
 
@@ -419,7 +400,7 @@ self.addEventListener("fetch", (event) => {
 														esModuleInterop: true,
 													},
 													url.origin + url.pathname + "?" + scriptSearchParams.toString()
-											)
+												)
 											: script.content,
 										"__sfc_main__"
 									)
