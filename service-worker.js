@@ -227,7 +227,7 @@ self.addEventListener("fetch", (event) => {
 		return event.respondWith(
 			(async () => {
 				await self.db.write("rootUrl", url.href);
-				console.log("根路径触发强制获取version.json")
+				console.log("根路径触发强制获取version.json");
 				await getVersion();
 				return fetchAndCacheOffline(event.request);
 			})()
@@ -395,17 +395,17 @@ self.addEventListener("fetch", (event) => {
 								.rewriteDefault(
 									script.attrs && script.attrs.lang == "ts"
 										? ts.transpile(
-											script.content,
-											{
-												module: ts.ModuleKind.ES2015,
-												//@todo: ES2019 -> ES2020
-												target: ts.ScriptTarget.ES2019,
-												inlineSourceMap: true,
-												resolveJsonModule: true,
-												esModuleInterop: true,
-											},
-											url.origin + url.pathname + "?" + scriptSearchParams.toString()
-										)
+												script.content,
+												{
+													module: ts.ModuleKind.ES2015,
+													//@todo: ES2019 -> ES2020
+													target: ts.ScriptTarget.ES2019,
+													inlineSourceMap: true,
+													resolveJsonModule: true,
+													esModuleInterop: true,
+												},
+												url.origin + url.pathname + "?" + scriptSearchParams.toString()
+											)
 										: script.content,
 									"__sfc_main__"
 								)
@@ -476,12 +476,12 @@ self.addEventListener("fetch", (event) => {
 							const id = Date.now().toString();
 							const scopeId = `data-v-${id}`;
 							js = `
-						const style = document.createElement('style');
-						style.setAttribute('type', 'text/css');
-						style.setAttribute('data-vue-dev-id', \`${scopeId}\`);
-						style.textContent = ${JSON.stringify(text)};
-						document.head.appendChild(style);
-					`;
+								const style = document.createElement('style');
+								style.setAttribute('type', 'text/css');
+								style.setAttribute('data-vue-dev-id', \`${scopeId}\`);
+								style.textContent = ${JSON.stringify(text)};
+								document.head.appendChild(style);
+							`;
 						}
 						const rep = new Response(new Blob([js], { type: "text/javascript" }), {
 							status: 200,
