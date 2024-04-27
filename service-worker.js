@@ -4,13 +4,13 @@
 const self = globalThis;
 // 以副作用导入typescript，以保证require也可以同步使用
 import "./game/typescript.js";
+// sfc以正常的esmodule使用
+import * as sfc from "./game/compiler-sfc.esm-browser.js";
 
 /**
  * @type { import("typescript") }
  */
 const ts = globalThis.ts;
-// sfc以正常的esmodule使用
-import * as sfc from "./game/compiler-sfc.esm-browser.js";
 if (typeof ts != "undefined") {
 	console.log(`ts loaded`, ts.version);
 } else {
@@ -26,8 +26,11 @@ if (typeof sfc != "undefined") {
 
 console.log("serviceWorker version 2.3");
 
-// 定义一个基于cache的db
-self.CACHE_DB_NAME = "SWHelperCache";
+// 定义缓存名称
+self.CACHE_NAME = "cache-v1-";
+self.CACHE_DB_NAME = "cache-v1-db";
+self.CACHE_STATIC_NAME = "cache-v1-static";
+self.CACHE_OFFLINE_NAME = "cache-v1-offline";
 self.db = {
 	read: (key) => {
 		return new Promise((resolve, reject) => {
@@ -67,67 +70,76 @@ self.db = {
 	},
 };
 
-// 定义 CACHE_NAME 来存储和检索缓存
-self.CACHE_NAME = "cache-v1-";
-self.CACHE_STATIC_NAME = "cache-v1-static";
-self.CACHE_OFFLINE_NAME = "cache-v1-offline";
-
 const getVersion = async () => {
 	const request = new Request("./version.json", {
-		cache: "no-store",
+		cache: "reload", // 强制从网络获取最新版本
 	});
-	const versionResponse = await fetchAndCacheOffline(request);
+	let versionResponse;
+	try {
+		console.log("直接请求服务器");
+		versionResponse = await fetch(request);
+		if (versionResponse.status === 200) {
+			const cache = await caches.open(self.CACHE_OFFLINE_NAME);
+			await cache.put(request, versionResponse.clone());
+		}
+	} catch (error) {
+		console.log("网络请求失败，尝试从缓存中获取版本信息。");
+		versionResponse = await fetchAndCacheOffline(request);
+	}
+
 	const versionData = await versionResponse.json();
 	self.version = versionData.version + "." + versionData.extVersion;
 	console.log("当前版本号: " + self.version);
-	self.db
-		.read("version")
-		.then((version) => {
-			if (version !== self.version) {
-				console.log("版本升级 " + version + " => " + self.version + " ");
-				// 定义一个允许保留的白名单
-				const cacheWhitelist = [self.CACHE_DB_NAME, self.CACHE_STATIC_NAME, self.CACHE_NAME + self.version];
-				caches.keys().then((cacheNames) => {
-					return Promise.all(
-						cacheNames.map((cacheName) => {
-							if (cacheWhitelist.indexOf(cacheName) === -1) {
-								// 删除不在白名单的缓存
-								return caches.delete(cacheName);
-							}
-						})
-					);
-				});
-			}
-		})
-		.then(() => {
-			self.db.write("version", self.version);
+	let oldVersion = await self.db.read("version");
+
+	if (oldVersion !== self.version) {
+		console.log("版本升级 " + oldVersion + " => " + self.version + " ");
+		// 定义一个允许保留的白名单
+		const cacheWhitelist = [self.CACHE_DB_NAME, self.CACHE_STATIC_NAME, self.CACHE_NAME + self.version];
+		await caches.keys().then((cacheNames) => {
+			return Promise.all(
+				cacheNames.map((cacheName) => {
+					if (cacheWhitelist.indexOf(cacheName) === -1) {
+						// 删除不在白名单的缓存
+						return caches.delete(cacheName);
+					}
+				})
+			);
 		});
+	}
+
+	await self.db.write("version", self.version);
+
 	return self.version;
 };
 
-const fetchAndCache = (event, request, version) => {
-	return event.respondWith(
-		// 在所有缓存中查询
-		caches.match(request).then((cachedResponse) => {
-			if (cachedResponse) {
-				// 如果在缓存中找到了资源，直接返回
-				return cachedResponse;
-			}
+const checkVersion = async () => {
+	if (typeof self.version === "undefined") {
+		console.log("检查版本时还未定义，准备获取版本号");
+		return await getVersion();
+	} else {
+		// 如果 version 已经定义，立即解析 Promise
+		return self.version;
+	}
+};
 
-			// 否则，继续从网络获取资源，并将其添加到缓存中
-			return fetch(request).then((networkResponse) => {
-				// 只缓存状态为 200 的响应
-				if (networkResponse.status === 200) {
-					// 根据参数version判断是放入静态文件缓存还是版本缓存
-					return caches.open(version ? self.CACHE_NAME + version : self.CACHE_STATIC_NAME).then((cache) => {
-						cache.put(request, networkResponse.clone()).then();
-						return networkResponse;
-					});
-				}
-				return networkResponse;
-			});
-		})
-	);
+const fetchAndCache = async (request, version) => {
+	const cacheName = version ? self.CACHE_NAME + version : self.CACHE_STATIC_NAME;
+	// 打开对应缓存
+	const cache = await caches.open(cacheName);
+	const cachedResponse = await cache.match(request);
+	if (cachedResponse) {
+		// 如果在缓存中找到了资源，直接返回
+		return cachedResponse;
+	}
+	const networkResponse = await fetch(request);
+	// 只缓存状态为 200 的响应
+	if (networkResponse.status === 200) {
+		// 根据参数version判断是放入静态文件缓存还是版本缓存
+		await cache.put(request, networkResponse.clone());
+		return networkResponse;
+	}
+	return networkResponse;
 };
 
 const fetchAndCacheOffline = (request) => {
@@ -144,6 +156,7 @@ const fetchAndCacheOffline = (request) => {
 			return networkResponse;
 		})
 		.catch(async (error) => {
+			console.log("遇到异常: " + error);
 			// 检查异常是否是因为用户脱机
 			if (error instanceof TypeError && !navigator.onLine) {
 				// 脱机状态，返回缓存的离线页面
@@ -156,48 +169,43 @@ const fetchAndCacheOffline = (request) => {
 		});
 };
 
-const checkVersion = () => {
-	if (typeof self.version === "undefined") {
-		return getVersion();
-	} else {
-		// 如果 version 已经定义，立即解析 Promise
-		return Promise.resolve(self.version);
-	}
-};
-
 self.addEventListener("install", (event) => {
 	// The promise that skipWaiting() returns can be safely ignored.
+	console.log("触发install事件");
 	event.waitUntil(
-		self.skipWaiting().then(() => {
-			getVersion().then(() => {
-				caches.open(self.CACHE_NAME + self.version).then((cache) => {
-					return cache.addAll([
-						// 列出要缓存的文件
-					]);
-				});
-			});
-		})
+		(async () => {
+			await self.skipWaiting();
+			const version = await getVersion();
+			const cache = await caches.open(self.CACHE_NAME + version);
+			await cache.addAll([
+				// 列出要缓存的文件
+			]);
+		})()
 	);
 });
 
 // 监听 'activate' 事件以清理旧缓存
 self.addEventListener("activate", (event) => {
-	event.waitUntil(getVersion());
-	// 定义一个允许保留的白名单
-	const cacheWhitelist = [self.CACHE_DB_NAME, self.CACHE_STATIC_NAME, self.CACHE_NAME + self.version, self.CACHE_OFFLINE_NAME];
-	console.log("清理旧缓存，白名单为: " + cacheWhitelist);
-	caches.keys().then((cacheNames) => {
-		return Promise.all(
-			cacheNames.map((cacheName) => {
-				if (cacheWhitelist.indexOf(cacheName) === -1) {
-					// 删除不在白名单的缓存
-					return caches.delete(cacheName);
-				}
-			})
-		);
-	});
+	console.log("触发activate事件");
 	// 当一个 service worker 被初始注册时，页面在下次加载之前不会使用它。 claim() 方法会立即控制这些页面
-	event.waitUntil(self.clients.claim());
+	event.waitUntil(
+		(async () => {
+			await self.clients.claim();
+			const version = await getVersion();
+			const cacheWhitelist = [self.CACHE_DB_NAME, self.CACHE_STATIC_NAME, self.CACHE_NAME + version, self.CACHE_OFFLINE_NAME];
+			console.log("清理旧缓存，白名单为: " + cacheWhitelist);
+			await caches.keys().then((cacheNames) => {
+				return Promise.all(
+					cacheNames.map((cacheName) => {
+						if (cacheWhitelist.indexOf(cacheName) === -1) {
+							// 删除不在白名单的缓存
+							return caches.delete(cacheName);
+						}
+					})
+				);
+			});
+		})()
+	);
 });
 
 self.addEventListener("message", (event) => {
@@ -216,10 +224,14 @@ self.addEventListener("fetch", (event) => {
 
 	if (url.href === self.registration.scope) {
 		console.log("根路径为: " + url.href);
-		self.db.write("rootUrl", url.href);
-		// 进入首页时触发一次获取版本号
-		event.waitUntil(getVersion());
-		return event.respondWith(fetchAndCacheOffline(event.request));
+		return event.respondWith(
+			(async () => {
+				await self.db.write("rootUrl", url.href);
+				console.log("根路径触发强制获取version.json")
+				await getVersion();
+				return fetchAndCacheOffline(event.request);
+			})()
+		);
 	}
 
 	// 检查请求是否为 GET，URL 是否有查询参数，以及文件后缀
@@ -234,93 +246,88 @@ self.addEventListener("fetch", (event) => {
 
 	// 到这里的都是静态资源文件
 	// 请求并缓存到静态文件缓存中
-	return fetchAndCache(event, request);
+	return event.respondWith(fetchAndCache(request));
 });
-
-/**
- * 将vue编译的结果放在这里，调用的时候直接返回就好了
- */
-// TODO 使用上面的DB缓存
-const vueFileMap = new Map();
 
 // 能到第二个fetch监听器的都是js|css|vue|ts|json之类的文件或者不是get方法或者有参数的
 self.addEventListener("fetch", (event) => {
-	let request = event.request;
-	if (typeof request.url != "string") return console.log(request);
-	// 直接替换request和url
-	let url = new URL(event.request.url);
-	// 为这些请求添加版本号
-	url.searchParams.set("v", self.version); // 添加参数 v=xxx
-	// 使用新的 URL 创建一个请求直接替换event的请求进行后续的使用
-	request = new Request(url, {
-		method: event.request.method,
-		headers: event.request.headers,
-		mode: "same-origin", // 确保请求模式相同
-		credentials: event.request.credentials,
-		redirect: "manual", // 因为这是一个新的请求，可能需要处理重定向
-	});
-	url = new URL(request.url);
-	if (vueFileMap.has(request.url)) {
-		const rep = new Response(new Blob([vueFileMap.get(request.url)], { type: "text/javascript" }), {
-			status: 200,
-			statusText: "OK",
-			headers: new Headers({
-				"Content-Type": "text/javascript",
-			}),
-		});
-		event.respondWith(rep);
-		return;
-	}
+	return event.respondWith(
+		(async (event) => {
+			let request = event.request;
+			if (typeof request.url != "string") return console.log(request);
+			// 直接替换request和url
+			let url = new URL(event.request.url);
+			// 检查一下版本号是否已经被设置
+			const version = await checkVersion();
+			// 为这些请求添加版本号
+			url.searchParams.set("v", version); // 添加参数 v=xxx
+			// 使用新的 URL 创建一个请求直接替换event的请求进行后续的使用
+			request = new Request(url, {
+				method: event.request.method,
+				headers: event.request.headers,
+				mode: "same-origin", // 确保请求模式相同
+				credentials: event.request.credentials,
+				redirect: "manual", // 因为这是一个新的请求，可能需要处理重定向
+			});
+			url = new URL(request.url);
 
-	// 不是这几个后缀的，也不是内置的模块的指定版本然后返回
-	if (![".ts", ".json", ".vue", "css"].some((ext) => url.pathname.endsWith(ext)) && !request.url.replace(location.origin, "").startsWith("/noname-builtinModules/")) {
-		return fetchAndCache(event, request, self.version);
-	}
+			const cache = await caches.open(self.CACHE_NAME + version);
 
-	// .d.ts 属于上面的漏网之鱼
-	if (url.pathname.endsWith(".d.ts")) {
-		return fetchAndCache(event, request, self.version);
-	}
-	// 如果不是请求跨域css或json时，直接请求
-	if (url.pathname.endsWith(".json") || url.pathname.endsWith("css")) {
-		if (!event.request.headers.get("origin")) {
-			return fetchAndCache(event, request, self.version);
-		}
-	}
-	// 能走到这里的只有
-	// 1. noname-builtinModules开头的表示内置模块的
-	// 2. ts、vue 需要编译的
-	// 3. 跨域请求json或者css的
-	if (request.url.replace(location.origin, "").startsWith("/noname-builtinModules/")) {
-		const moduleName = url.pathname.replace(location.origin + "/noname-builtinModules/", "");
-		console.log("正在编译", moduleName);
-		let js = `const module = require('${moduleName}');\nexport default module;`;
-		const rep = new Response(new Blob([js], { type: "text/javascript" }), {
-			status: 200,
-			statusText: "OK",
-			headers: new Headers({
-				"Content-Type": "text/javascript",
-			}),
-		});
-		console.log(moduleName, "编译成功");
-		event.respondWith(Promise.resolve(rep));
-	} else {
-		// 请求原文件
-		const originRequest = new Request(request.url, {
-			method: request.method,
-			mode: "no-cors",
-			headers: new Headers({
-				"Content-Type": "text/plain",
-			}),
-		});
-		const res = fetchAndCacheOffline(originRequest);
-		// 修改请求结果
-		event.respondWith(
-			res
-				.then((res) => {
-					if (res.status !== 200) return res;
-					console.log("正在编译", request.url);
-					return res.text().then((text) => {
+			const response = await cache.match(request.url);
+
+			if (response) {
+				return response;
+			}
+
+			// 不是这几个后缀的，也不是内置的模块的指定版本然后返回
+			if (![".ts", ".json", ".vue", "css"].some((ext) => url.pathname.endsWith(ext)) && !request.url.replace(location.origin, "").startsWith("/noname-builtinModules/")) {
+				return fetchAndCache(request, version);
+			}
+
+			// .d.ts 属于上面的漏网之鱼
+			if (url.pathname.endsWith(".d.ts")) {
+				return fetchAndCache(request, version);
+			}
+			// 如果不是请求跨域css或json时，直接请求
+			if (url.pathname.endsWith(".json") || url.pathname.endsWith("css")) {
+				if (!event.request.headers.get("origin")) {
+					return fetchAndCache(request, version);
+				}
+			}
+			// 能走到这里的只有
+			// 1. noname-builtinModules开头的表示内置模块的
+			// 2. ts、vue 需要编译的
+			// 3. 跨域请求json或者css的
+			if (request.url.replace(location.origin, "").startsWith("/noname-builtinModules/")) {
+				const moduleName = url.pathname.replace(location.origin + "/noname-builtinModules/", "");
+				console.log("正在编译", moduleName);
+				let js = `const module = require('${moduleName}');\nexport default module;`;
+				const rep = new Response(new Blob([js], { type: "text/javascript" }), {
+					status: 200,
+					statusText: "OK",
+					headers: new Headers({
+						"Content-Type": "text/javascript",
+					}),
+				});
+				console.log(moduleName, "编译成功");
+				return rep;
+			} else {
+				// 请求原文件
+				const originRequest = new Request(request.url, {
+					method: request.method,
+					mode: "no-cors",
+					headers: new Headers({
+						"Content-Type": "text/plain",
+					}),
+				});
+				// 请求源文件后修改请求结果
+				// 然后手动缓存
+				return fetch(originRequest)
+					.then(async (res) => {
+						if (res.status !== 200) return res;
+						console.log("正在编译", request.url);
+						let text = await res.text();
+
 						let js = "";
 						if (url.pathname.endsWith(".json")) {
 							js = `export default ${text}`;
@@ -383,31 +390,39 @@ self.addEventListener("fetch", (event) => {
 								subPath = parts.slice(0, index).join("/") + "/";
 							}
 
-							vueFileMap.set(
+							// 重写 default
+							const scriptJs = sfc
+								.rewriteDefault(
+									script.attrs && script.attrs.lang == "ts"
+										? ts.transpile(
+											script.content,
+											{
+												module: ts.ModuleKind.ES2015,
+												//@todo: ES2019 -> ES2020
+												target: ts.ScriptTarget.ES2019,
+												inlineSourceMap: true,
+												resolveJsonModule: true,
+												esModuleInterop: true,
+											},
+											url.origin + url.pathname + "?" + scriptSearchParams.toString()
+										)
+										: script.content,
+									"__sfc_main__"
+								)
+								.replace(`const __sfc_main__`, `export const __sfc_main__`)
+								// import vue重新指向
+								.replaceAll(`from "vue"`, `from "${subPath}game/vue.esm-browser.js"`)
+								.replaceAll(`from 'vue'`, `from '${subPath}game/vue.esm-browser.js'`);
+
+							await cache.put(
 								url.origin + url.pathname + "?" + scriptSearchParams.toString(),
-								// 重写 default
-								sfc
-									.rewriteDefault(
-										script.attrs && script.attrs.lang == "ts"
-											? ts.transpile(
-													script.content,
-													{
-														module: ts.ModuleKind.ES2015,
-														//@todo: ES2019 -> ES2020
-														target: ts.ScriptTarget.ES2019,
-														inlineSourceMap: true,
-														resolveJsonModule: true,
-														esModuleInterop: true,
-													},
-													url.origin + url.pathname + "?" + scriptSearchParams.toString()
-												)
-											: script.content,
-										"__sfc_main__"
-									)
-									.replace(`const __sfc_main__`, `export const __sfc_main__`)
-									// import vue重新指向
-									.replaceAll(`from "vue"`, `from "${subPath}game/vue.esm-browser.js"`)
-									.replaceAll(`from 'vue'`, `from '${subPath}game/vue.esm-browser.js'`)
+								new Response(new Blob([scriptJs], { type: "text/javascript" }), {
+									status: 200,
+									statusText: "OK",
+									headers: new Headers({
+										"Content-Type": "text/javascript",
+									}),
+								})
 							);
 
 							codeList.push(`import { __sfc_main__ } from '${url.origin + url.pathname + "?" + scriptSearchParams.toString()}'`);
@@ -424,12 +439,19 @@ self.addEventListener("fetch", (event) => {
 								},
 							});
 
-							vueFileMap.set(
+							const templateJs = template.code
+								// .replace(`function render(_ctx, _cache) {`, str => str + 'console.log(_ctx);')
+								.replaceAll(`from "vue"`, `from "${subPath}game/vue.esm-browser.js"`)
+								.replaceAll(`from 'vue'`, `from '${subPath}game/vue.esm-browser.js'`);
+							await cache.put(
 								url.origin + url.pathname + "?" + templateSearchParams.toString(),
-								template.code
-									// .replace(`function render(_ctx, _cache) {`, str => str + 'console.log(_ctx);')
-									.replaceAll(`from "vue"`, `from "${subPath}game/vue.esm-browser.js"`)
-									.replaceAll(`from 'vue'`, `from '${subPath}game/vue.esm-browser.js'`)
+								new Response(new Blob([templateJs], { type: "text/javascript" }), {
+									status: 200,
+									statusText: "OK",
+									headers: new Headers({
+										"Content-Type": "text/javascript",
+									}),
+								})
 							);
 
 							codeList.push(`import { render } from '${url.origin + url.pathname + "?" + templateSearchParams.toString()}'`);
@@ -454,12 +476,12 @@ self.addEventListener("fetch", (event) => {
 							const id = Date.now().toString();
 							const scopeId = `data-v-${id}`;
 							js = `
-								const style = document.createElement('style');
-								style.setAttribute('type', 'text/css');
-								style.setAttribute('data-vue-dev-id', \`${scopeId}\`);
-								style.textContent = ${JSON.stringify(text)};
-								document.head.appendChild(style);
-							`;
+						const style = document.createElement('style');
+						style.setAttribute('type', 'text/css');
+						style.setAttribute('data-vue-dev-id', \`${scopeId}\`);
+						style.textContent = ${JSON.stringify(text)};
+						document.head.appendChild(style);
+					`;
 						}
 						const rep = new Response(new Blob([js], { type: "text/javascript" }), {
 							status: 200,
@@ -469,13 +491,15 @@ self.addEventListener("fetch", (event) => {
 							}),
 						});
 						console.log(request.url, "编译成功");
+						// 手动缓存源请求对应的修改后的响应
+						await cache.put(request.url, rep);
 						return rep;
+					})
+					.catch((e) => {
+						console.error(request.url, "编译失败: ", e);
+						throw e;
 					});
-				})
-				.catch((e) => {
-					console.error(request.url, "编译失败: ", e);
-					throw e;
-				})
-		);
-	}
+			}
+		})(event)
+	);
 });
