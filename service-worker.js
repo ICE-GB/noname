@@ -215,11 +215,17 @@ self.addEventListener("message", (event) => {
 // 监听 'fetch' 事件以拦截网络请求
 self.addEventListener("fetch", (event) => {
 	const request = event.request;
+
+	if (request.method !== "GET") {
+		console.log("非get请求直接进行请求" + request.url);
+		return event.respondWith(fetch(event.request));
+	}
+
 	const url = new URL(request.url);
 
 	if (!url.protocol.startsWith("http")) {
 		console.log("非http请求直接进行请求" + url);
-		return event.respondWith(fetchAndCacheOffline(event.request));
+		return event.respondWith(fetch(event.request));
 	}
 
 	if (url.href === self.registration.scope) {
@@ -269,10 +275,10 @@ self.addEventListener("fetch", (event) => {
 				credentials: event.request.credentials,
 				redirect: "manual", // 因为这是一个新的请求，可能需要处理重定向
 			});
-			url = new URL(request.url);
 
 			const cache = await caches.open(self.CACHE_NAME + version);
 
+			// 注意这里放的不是request对象
 			const response = await cache.match(request.url);
 
 			if (response) {
