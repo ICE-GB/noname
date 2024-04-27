@@ -492,7 +492,7 @@ self.addEventListener("fetch", (event) => {
 						});
 						console.log(request.url, "编译成功");
 						// 手动缓存源请求对应的修改后的响应
-						await cache.put(request.url, rep);
+						await cache.put(request.url, rep.clone());
 						return rep;
 					})
 					.catch((e) => {
